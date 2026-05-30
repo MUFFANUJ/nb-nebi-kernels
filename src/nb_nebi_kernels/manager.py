@@ -8,12 +8,13 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from jupyter_client.kernelspec import KernelSpec, KernelSpecManager, NoSuchKernel
-from traitlets import List, Unicode
+from traitlets import Float, List, Unicode
 
 from nb_nebi_kernels.discovery import (
     NebiWorkspace,
@@ -60,6 +61,14 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         config=True,
         help="Packages required in each pixi environment for a kernel to be launchable.",
     )
+    discovery_cache_ttl_seconds = Float(
+        default_value=30.0,
+        config=True,
+        help=(
+            "Seconds to cache workspace discovery results before recomputing. "
+            "Set to 0 to disable caching."
+        ),
+    )
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -68,6 +77,7 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         self._single_env_workspaces: set[str] = set()
         self._discovery_hash: str = ""
         self._discovered_at: str = ""
+        self._last_discovery_monotonic: float | None = None
         self._fallback_resource_dir = os.path.dirname(__file__)
 
         logger.info("NebiKernelSpecManager initialized")
@@ -227,8 +237,23 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         self._discovery_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         self._discovered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _discover(self) -> None:
+    def invalidate_discovery_cache(self) -> None:
+        """Force the next discovery call to recompute immediately."""
+        self._last_discovery_monotonic = None
+
+    def _discover(self, *, force: bool = False) -> None:
         """Run discovery and populate the kernel registry."""
+        ttl_seconds = float(self.discovery_cache_ttl_seconds)
+        if not force and ttl_seconds > 0 and self._last_discovery_monotonic is not None:
+            age_seconds = time.monotonic() - self._last_discovery_monotonic
+            if age_seconds < ttl_seconds:
+                logger.debug(
+                    "Using cached nebi discovery (age=%.2fs, ttl=%.2fs)",
+                    age_seconds,
+                    ttl_seconds,
+                )
+                return
+
         self._kernel_registry.clear()
         self._single_env_workspaces.clear()
 
@@ -252,6 +277,7 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
                 self._kernel_registry[kernel_name] = self._classify_kernel_state(ws, env)
 
         self._update_discovery_metadata()
+        self._last_discovery_monotonic = time.monotonic()
         logger.info("Discovered %d nebi kernels", len(self._kernel_registry))
 
     def find_kernel_specs(self) -> dict[str, str]:
@@ -273,7 +299,7 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
             return self._create_kernel_spec(entry)
 
         # Refresh in case a new workspace was added
-        self._discover()
+        self._discover(force=True)
         if kernel_name in self._kernel_registry:
             entry = self._kernel_registry[kernel_name]
             return self._create_kernel_spec(entry)
@@ -286,6 +312,8 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         env = entry.environment
         local_version = ws.local_version
         remote_version = ws.remote_version
+        # Independent version-drift signal: can be true even when nebi_state
+        # reports a higher-priority blocker (e.g. missing dependencies).
         is_outdated = bool(local_version and remote_version and local_version != remote_version)
 
         argv = [
@@ -310,27 +338,8 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
             "nebi_outdated": is_outdated,
             "nebi_source": ws.source,
             "nebi_not_ready_reason": entry.not_ready_reason,
-            "nebi_logo_reason": (
-                None if entry.state in {"ready", "outdated"} else entry.not_ready_reason
-            ),
             "nebi_discovery_hash": self._discovery_hash,
             "nebi_discovered_at": self._discovered_at,
-            "nebi": {
-                "workspace": ws.name,
-                "workspace_path": ws.path,
-                "environment": env,
-                "state": entry.state,
-                "missing_dependencies": entry.missing_dependencies,
-                "local_version": local_version,
-                "remote_version": remote_version,
-                "outdated": is_outdated,
-                "not_ready_reason": entry.not_ready_reason,
-                "logo_reason": None
-                if entry.state in {"ready", "outdated"}
-                else entry.not_ready_reason,
-                "discovery_hash": self._discovery_hash,
-                "discovered_at": self._discovered_at,
-            },
         }
 
         resource_dir = (

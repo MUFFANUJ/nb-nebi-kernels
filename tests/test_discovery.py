@@ -119,6 +119,17 @@ class TestDiscoverEnvironments:
 
         assert envs == ["default"]
 
+    def test_returns_default_when_pixi_not_found(self) -> None:
+        """Falls back to ['default'] if pixi is not installed."""
+        with (
+            patch("nb_nebi_kernels.discovery.subprocess.run") as mock_run,
+            patch("nb_nebi_kernels.discovery._find_manifest", return_value="/mock/pixi.toml"),
+        ):
+            mock_run.side_effect = FileNotFoundError("pixi not found")
+            envs = discover_environments("/home/user/data-science")
+
+        assert envs == ["default"]
+
 
 class TestDiscoverRemoteWorkspaces:
     """Tests for discover_remote_workspaces()."""
@@ -271,14 +282,3 @@ class TestProbeEnvironment:
 
         assert probe.installed is False
         assert probe.reason == "pixi-list-failed"
-
-    def test_returns_default_when_pixi_not_found(self) -> None:
-        """Falls back to ['default'] if pixi is not installed."""
-        with (
-            patch("nb_nebi_kernels.discovery.subprocess.run") as mock_run,
-            patch("nb_nebi_kernels.discovery._find_manifest", return_value="/mock/pixi.toml"),
-        ):
-            mock_run.side_effect = FileNotFoundError("pixi not found")
-            envs = discover_environments("/home/user/data-science")
-
-        assert envs == ["default"]

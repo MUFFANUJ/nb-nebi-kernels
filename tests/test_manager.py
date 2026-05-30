@@ -172,7 +172,7 @@ class TestNebiKernelSpecManager:
         assert "nebi-remote-only-gpu" in specs
         assert spec.metadata["nebi_state"] == "remote-not-pulled"
         assert spec.metadata["nebi_not_ready_reason"] == "workspace-not-pulled"
-        assert spec.metadata["nebi"]["state"] == "remote-not-pulled"
+        assert "nebi" not in spec.metadata
 
     def test_local_workspace_state_not_installed(self) -> None:
         """Local workspace env is marked local-not-installed when probe fails install check."""
@@ -192,7 +192,7 @@ class TestNebiKernelSpecManager:
 
         assert spec.metadata["nebi_state"] == "local-not-installed"
         assert spec.metadata["nebi_not_ready_reason"] == "environment-not-installed"
-        assert spec.metadata["nebi_logo_reason"] == "environment-not-installed"
+        assert "nebi_logo_reason" not in spec.metadata
 
     def test_local_workspace_state_missing_dependencies(self) -> None:
         """Local workspace env is marked local-missing-deps when required deps are absent."""
@@ -213,6 +213,7 @@ class TestNebiKernelSpecManager:
         assert spec.metadata["nebi_state"] == "local-missing-deps"
         assert spec.metadata["nebi_missing_dependencies"] == ["ipykernel"]
         assert spec.metadata["nebi_not_ready_reason"] == "missing-dependencies"
+        assert "nebi_logo_reason" not in spec.metadata
 
     def test_outdated_state_when_remote_version_differs(self) -> None:
         """Local workspace is marked outdated when local/ref and remote/ref drift."""
@@ -235,6 +236,7 @@ class TestNebiKernelSpecManager:
         assert spec.metadata["nebi_local_version"] == "v1"
         assert spec.metadata["nebi_remote_version"] == "v2"
         assert spec.metadata["nebi_outdated"] is True
+        assert "nebi_logo_reason" not in spec.metadata
 
     def test_discovery_hash_and_timestamp_metadata(self) -> None:
         """Kernel metadata includes deterministic discovery hash and timestamp."""
@@ -285,3 +287,36 @@ class TestNebiKernelSpecManager:
 
         assert "nebi-project-default" in specs
         assert "nebi-project-gpu" in specs
+
+    def test_find_kernel_specs_uses_discovery_cache(self) -> None:
+        """Repeated find calls within TTL reuse cached discovery results."""
+        with (
+            patch("nb_nebi_kernels.manager.discover_workspaces") as mock_local,
+            patch("nb_nebi_kernels.manager.discover_remote_workspaces") as mock_remote,
+        ):
+            mock_local.return_value = [NebiWorkspace(name="project", path="/tmp/project")]
+            mock_remote.return_value = []
+
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            manager.find_kernel_specs()
+
+        assert mock_local.call_count == 1
+        assert mock_remote.call_count == 1
+
+    def test_invalidate_discovery_cache_forces_refresh(self) -> None:
+        """Manual cache invalidation forces discovery on the next lookup."""
+        with (
+            patch("nb_nebi_kernels.manager.discover_workspaces") as mock_local,
+            patch("nb_nebi_kernels.manager.discover_remote_workspaces") as mock_remote,
+        ):
+            mock_local.return_value = [NebiWorkspace(name="project", path="/tmp/project")]
+            mock_remote.return_value = []
+
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            manager.invalidate_discovery_cache()
+            manager.find_kernel_specs()
+
+        assert mock_local.call_count == 2
+        assert mock_remote.call_count == 2

@@ -173,16 +173,17 @@ class TestMissingKernelBranch:
             "{connection_file}",
         ]
 
-    def test_display_name_decorated(
+    def test_display_name_undecorated(
         self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]
     ) -> None:
-        """Missing-kernel envs carry the '— no kernel installed' marker."""
+        """Missing-kernel envs keep the normal display name (no marker)."""
         with _patched_discovery(workspaces, envs_map, env_has_kernel=False):
             manager = NebiKernelSpecManager()
             manager.find_kernel_specs()
             spec = manager.get_kernel_spec("nebi-data-science-gpu")
 
-        assert spec.display_name == "data-science (gpu) — no kernel installed"
+        assert spec.display_name == "data-science (gpu)"
+        assert "— no kernel installed" not in spec.display_name
 
     def test_metadata_state_flag(
         self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]

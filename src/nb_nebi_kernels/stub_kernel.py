@@ -8,9 +8,6 @@ protocol (ZMQ binding, heartbeat, signing, kernel_info handshake). JupyterLab
 treats it as a live kernel rather than misclassifying a fast-exiting launcher
 as "kernel died, retry". Any ``execute_request`` returns a structured error
 whose traceback is the install instructions — visible in cell output.
-
-See ``experiment/DESIGN.md`` for the integration design and the rationale for
-preferring this over a custom ``KernelManager`` raising HTTPError.
 """
 
 from __future__ import annotations

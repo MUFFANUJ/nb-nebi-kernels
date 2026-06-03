@@ -170,11 +170,9 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
             "nebi_kernel_state": "missing-kernel",
         }
 
-        display_name = f"{self._make_display_name(ws, env)} — no kernel installed"
-
         return KernelSpec(
             argv=argv,
-            display_name=display_name,
+            display_name=self._make_display_name(ws, env),
             language="no-op",
             resource_dir=ws.path,
             metadata=metadata,

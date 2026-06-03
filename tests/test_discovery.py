@@ -1,11 +1,13 @@
 """Tests for workspace and environment discovery."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from nb_nebi_kernels.discovery import (
     discover_environments,
     discover_workspaces,
+    env_has_any_kernelspec,
 )
 
 
@@ -119,3 +121,33 @@ class TestDiscoverEnvironments:
             envs = discover_environments("/home/user/data-science")
 
         assert envs == ["default"]
+
+
+class TestEnvHasAnyKernelspec:
+    """Tests for env_has_any_kernelspec()."""
+
+    def test_true_when_kernelspec_present(self, tmp_path: Path) -> None:
+        """Detects a kernel.json under share/jupyter/kernels/."""
+        kernels = tmp_path / ".pixi" / "envs" / "default" / "share" / "jupyter" / "kernels"
+        (kernels / "python3").mkdir(parents=True)
+        (kernels / "python3" / "kernel.json").write_text("{}")
+
+        assert env_has_any_kernelspec(str(tmp_path), "default") is True
+
+    def test_false_when_env_prefix_missing(self, tmp_path: Path) -> None:
+        """Returns False when the env was never installed."""
+        assert env_has_any_kernelspec(str(tmp_path), "default") is False
+
+    def test_false_when_kernels_dir_empty(self, tmp_path: Path) -> None:
+        """Returns False when share/jupyter/kernels/ has no kernelspecs."""
+        kernels = tmp_path / ".pixi" / "envs" / "default" / "share" / "jupyter" / "kernels"
+        kernels.mkdir(parents=True)
+        assert env_has_any_kernelspec(str(tmp_path), "default") is False
+
+    def test_finds_non_python_kernel(self, tmp_path: Path) -> None:
+        """Returns True for any kernelspec, not just python3."""
+        kernels = tmp_path / ".pixi" / "envs" / "gpu" / "share" / "jupyter" / "kernels"
+        (kernels / "ir").mkdir(parents=True)
+        (kernels / "ir" / "kernel.json").write_text("{}")
+
+        assert env_has_any_kernelspec(str(tmp_path), "gpu") is True

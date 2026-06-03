@@ -13,6 +13,7 @@ from nb_nebi_kernels.discovery import (
     NebiWorkspace,
     discover_environments,
     discover_workspaces,
+    env_has_any_kernelspec,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,18 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         return super().get_kernel_spec(kernel_name)
 
     def _create_kernel_spec(self, ws: NebiWorkspace, env: str) -> KernelSpec:
-        """Create a KernelSpec for a workspace environment."""
+        """Create a KernelSpec for a workspace environment.
+
+        Branches on whether the env has a Jupyter kernel installed: working
+        envs route through the pixi-based launcher; envs missing a kernel
+        route through ``nb_nebi_kernels.stub_kernel`` so the user gets a
+        clear install message in cell output instead of a silent failure.
+        """
+        if env_has_any_kernelspec(ws.path, env):
+            return self._working_kernel_spec(ws, env)
+        return self._stub_kernel_spec(ws, env)
+
+    def _working_kernel_spec(self, ws: NebiWorkspace, env: str) -> KernelSpec:
         argv = [
             sys.executable,
             "-m",
@@ -123,18 +135,45 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
             "{connection_file}",
         ]
 
-        display_name = self._make_display_name(ws, env)
+        metadata = {
+            "nebi_workspace": ws.name,
+            "nebi_workspace_path": ws.path,
+            "pixi_environment": env,
+            "nebi_kernel_state": "ready",
+        }
+
+        return KernelSpec(
+            argv=argv,
+            display_name=self._make_display_name(ws, env),
+            language="python",
+            resource_dir=ws.path,
+            metadata=metadata,
+        )
+
+    def _stub_kernel_spec(self, ws: NebiWorkspace, env: str) -> KernelSpec:
+        argv = [
+            sys.executable,
+            "-m",
+            "nb_nebi_kernels.stub_kernel",
+            "--workspace",
+            ws.name,
+            "--env",
+            env,
+            "-f",
+            "{connection_file}",
+        ]
 
         metadata = {
             "nebi_workspace": ws.name,
             "nebi_workspace_path": ws.path,
             "pixi_environment": env,
+            "nebi_kernel_state": "missing-kernel",
         }
 
         return KernelSpec(
             argv=argv,
-            display_name=display_name,
-            language="python",
+            display_name=self._make_display_name(ws, env),
+            language="no-op",
             resource_dir=ws.path,
             metadata=metadata,
         )

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -76,6 +78,27 @@ def _find_manifest(workspace_path: str) -> str:
         if os.path.exists(path):
             return path
     return os.path.join(workspace_path, "pixi.toml")
+
+
+def env_has_any_kernelspec(workspace_path: str, env: str) -> bool:
+    """Return True if the pixi env contains at least one Jupyter kernelspec.
+
+    Looks under ``<workspace>/.pixi/envs/<env>/share/jupyter/kernels/*/kernel.json``.
+    Returns False if the env prefix doesn't exist (env never installed) — same
+    user-facing failure (no kernel available), same recovery (install one).
+    """
+    pattern = os.path.join(
+        workspace_path,
+        ".pixi",
+        "envs",
+        env,
+        "share",
+        "jupyter",
+        "kernels",
+        "*",
+        "kernel.json",
+    )
+    return bool(glob.glob(pattern))
 
 
 def discover_environments(workspace_path: str) -> list[str]:

@@ -1,12 +1,41 @@
 """Tests for NebiKernelSpecManager."""
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
-from nb_nebi_kernels.discovery import NebiWorkspace
+from nb_nebi_kernels.discovery import EnvironmentProbe, NebiWorkspace
 from nb_nebi_kernels.manager import NebiKernelSpecManager
+
+
+@contextmanager
+def _patched_discovery(
+    workspaces: list[NebiWorkspace],
+    envs_map: dict[str, list[str]],
+    *,
+    env_has_kernel: bool = True,
+) -> Iterator[None]:
+    """Patch discovery + env probe so tests can control the kernelspec branch."""
+    with (
+        patch("nb_nebi_kernels.manager.discover_workspaces", return_value=workspaces),
+        patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
+        patch(
+            "nb_nebi_kernels.manager.discover_environments",
+            side_effect=lambda p: envs_map[p],
+        ),
+        patch(
+            "nb_nebi_kernels.manager.probe_environment",
+            return_value=EnvironmentProbe(installed=True, missing_dependencies=[]),
+        ),
+        patch(
+            "nb_nebi_kernels.manager.env_has_any_kernelspec",
+            return_value=env_has_kernel,
+        ),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -33,14 +62,7 @@ class TestNebiKernelSpecManager:
         self, sample_workspaces: list[NebiWorkspace], sample_envs_map: dict[str, list[str]]
     ) -> None:
         """find_kernel_specs returns one entry per (workspace, env) pair."""
-        with (
-            patch("nb_nebi_kernels.manager.discover_workspaces", return_value=sample_workspaces),
-            patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
-            patch(
-                "nb_nebi_kernels.manager.discover_environments",
-                side_effect=lambda p: sample_envs_map[p],
-            ),
-        ):
+        with _patched_discovery(sample_workspaces, sample_envs_map):
             manager = NebiKernelSpecManager()
             specs = manager.find_kernel_specs()
 
@@ -54,12 +76,7 @@ class TestNebiKernelSpecManager:
     ) -> None:
         """find_kernel_specs also includes standard kernels from parent."""
         with (
-            patch("nb_nebi_kernels.manager.discover_workspaces", return_value=sample_workspaces),
-            patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
-            patch(
-                "nb_nebi_kernels.manager.discover_environments",
-                side_effect=lambda p: sample_envs_map[p],
-            ),
+            _patched_discovery(sample_workspaces, sample_envs_map),
             patch.object(
                 NebiKernelSpecManager.__bases__[0],
                 "find_kernel_specs",
@@ -75,14 +92,7 @@ class TestNebiKernelSpecManager:
         self, sample_workspaces: list[NebiWorkspace], sample_envs_map: dict[str, list[str]]
     ) -> None:
         """get_kernel_spec returns a KernelSpec with correct argv for pixi launch."""
-        with (
-            patch("nb_nebi_kernels.manager.discover_workspaces", return_value=sample_workspaces),
-            patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
-            patch(
-                "nb_nebi_kernels.manager.discover_environments",
-                side_effect=lambda p: sample_envs_map[p],
-            ),
-        ):
+        with _patched_discovery(sample_workspaces, sample_envs_map):
             manager = NebiKernelSpecManager()
             manager.find_kernel_specs()
             spec = manager.get_kernel_spec("nebi-data-science-gpu")
@@ -100,14 +110,7 @@ class TestNebiKernelSpecManager:
         self, sample_workspaces: list[NebiWorkspace], sample_envs_map: dict[str, list[str]]
     ) -> None:
         """Display name format: 'workspace (env)' or just 'workspace' for default."""
-        with (
-            patch("nb_nebi_kernels.manager.discover_workspaces", return_value=sample_workspaces),
-            patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
-            patch(
-                "nb_nebi_kernels.manager.discover_environments",
-                side_effect=lambda p: sample_envs_map[p],
-            ),
-        ):
+        with _patched_discovery(sample_workspaces, sample_envs_map):
             manager = NebiKernelSpecManager()
             manager.find_kernel_specs()
             gpu_spec = manager.get_kernel_spec("nebi-data-science-gpu")
@@ -121,14 +124,7 @@ class TestNebiKernelSpecManager:
         self, sample_workspaces: list[NebiWorkspace], sample_envs_map: dict[str, list[str]]
     ) -> None:
         """get_kernel_spec delegates to parent for non-nebi kernels."""
-        with (
-            patch("nb_nebi_kernels.manager.discover_workspaces", return_value=sample_workspaces),
-            patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
-            patch(
-                "nb_nebi_kernels.manager.discover_environments",
-                side_effect=lambda p: sample_envs_map[p],
-            ),
-        ):
+        with _patched_discovery(sample_workspaces, sample_envs_map):
             manager = NebiKernelSpecManager()
             manager.find_kernel_specs()
             from jupyter_client.kernelspec import NoSuchKernel
@@ -224,6 +220,7 @@ class TestNebiKernelSpecManager:
             patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[remote]),
             patch("nb_nebi_kernels.manager.discover_environments", return_value=["default"]),
             patch("nb_nebi_kernels.manager.probe_environment") as mock_probe,
+            patch("nb_nebi_kernels.manager.env_has_any_kernelspec", return_value=True),
         ):
             mock_probe.return_value.installed = True
             mock_probe.return_value.missing_dependencies = []
@@ -246,6 +243,7 @@ class TestNebiKernelSpecManager:
             patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[]),
             patch("nb_nebi_kernels.manager.discover_environments", return_value=["default"]),
             patch("nb_nebi_kernels.manager.probe_environment") as mock_probe,
+            patch("nb_nebi_kernels.manager.env_has_any_kernelspec", return_value=True),
         ):
             mock_probe.return_value.installed = True
             mock_probe.return_value.missing_dependencies = []
@@ -278,6 +276,7 @@ class TestNebiKernelSpecManager:
             patch("nb_nebi_kernels.manager.discover_remote_workspaces", return_value=[remote]),
             patch("nb_nebi_kernels.manager.discover_environments", return_value=["default"]),
             patch("nb_nebi_kernels.manager.probe_environment") as mock_probe,
+            patch("nb_nebi_kernels.manager.env_has_any_kernelspec", return_value=True),
         ):
             mock_probe.return_value.installed = True
             mock_probe.return_value.missing_dependencies = []
@@ -320,3 +319,71 @@ class TestNebiKernelSpecManager:
 
         assert mock_local.call_count == 2
         assert mock_remote.call_count == 2
+
+
+class TestMissingKernelBranch:
+    """KernelSpec generation for envs that have no Jupyter kernel installed."""
+
+    @pytest.fixture
+    def workspaces(self) -> list[NebiWorkspace]:
+        return [NebiWorkspace(name="data-science", path="/home/user/data-science")]
+
+    @pytest.fixture
+    def envs_map(self) -> dict[str, list[str]]:
+        return {"/home/user/data-science": ["default", "gpu"]}
+
+    def test_argv_targets_stub_kernel(
+        self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]
+    ) -> None:
+        """When env has no kernel, argv invokes nb_nebi_kernels.stub_kernel."""
+        with _patched_discovery(workspaces, envs_map, env_has_kernel=False):
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            spec = manager.get_kernel_spec("nebi-data-science-gpu")
+
+        assert spec.argv == [
+            sys.executable,
+            "-m",
+            "nb_nebi_kernels.stub_kernel",
+            "--workspace",
+            "data-science",
+            "--env",
+            "gpu",
+            "-f",
+            "{connection_file}",
+        ]
+
+    def test_display_name_undecorated(
+        self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]
+    ) -> None:
+        """Missing-kernel envs keep the normal display name (no marker)."""
+        with _patched_discovery(workspaces, envs_map, env_has_kernel=False):
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            spec = manager.get_kernel_spec("nebi-data-science-gpu")
+
+        assert spec.display_name == "data-science (gpu)"
+        assert "— no kernel installed" not in spec.display_name
+
+    def test_metadata_state_flag(
+        self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]
+    ) -> None:
+        """Stub kernelspecs carry nebi_kernel_state=missing-kernel for tooling."""
+        with _patched_discovery(workspaces, envs_map, env_has_kernel=False):
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            spec = manager.get_kernel_spec("nebi-data-science-gpu")
+
+        assert spec.metadata["nebi_kernel_state"] == "missing-kernel"
+
+    def test_working_envs_get_ready_state(
+        self, workspaces: list[NebiWorkspace], envs_map: dict[str, list[str]]
+    ) -> None:
+        """Working envs carry nebi_kernel_state=ready in metadata."""
+        with _patched_discovery(workspaces, envs_map, env_has_kernel=True):
+            manager = NebiKernelSpecManager()
+            manager.find_kernel_specs()
+            spec = manager.get_kernel_spec("nebi-data-science-gpu")
+
+        assert spec.metadata["nebi_kernel_state"] == "ready"
+        assert "— no kernel installed" not in spec.display_name

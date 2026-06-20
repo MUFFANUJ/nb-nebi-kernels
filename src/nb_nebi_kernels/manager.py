@@ -21,6 +21,7 @@ from nb_nebi_kernels.discovery import (
     discover_environments,
     discover_remote_workspaces,
     discover_workspaces,
+    env_has_any_kernelspec,
     probe_environment,
 )
 
@@ -38,7 +39,7 @@ class KernelEntry:
     not_ready_reason: str | None
 
 
-class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
+class NebiKernelSpecManager(KernelSpecManager):
     """KernelSpecManager that discovers kernels from nebi-tracked pixi workspaces.
 
     Each (workspace, environment) pair becomes a launchable Jupyter kernel.
@@ -159,6 +160,15 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
                 environment=env,
                 state="local-missing-deps",
                 missing_dependencies=probe.missing_dependencies,
+                not_ready_reason="missing-dependencies",
+            )
+
+        if not env_has_any_kernelspec(workspace.path, env):
+            return KernelEntry(
+                workspace=workspace,
+                environment=env,
+                state="local-missing-deps",
+                missing_dependencies=["ipykernel"],
                 not_ready_reason="missing-dependencies",
             )
 
@@ -307,31 +317,30 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
         return super().get_kernel_spec(kernel_name)
 
     def _create_kernel_spec(self, entry: KernelEntry) -> KernelSpec:
-        """Create a KernelSpec for a workspace environment."""
+        """Create a KernelSpec for a workspace environment.
+
+        Launchable entries route through the pixi-based launcher. Local
+        entries that are not installed or are missing a Jupyter kernel route
+        through ``nb_nebi_kernels.stub_kernel`` so the user gets an actionable
+        cell error instead of a silent kernel failure.
+        """
+        if entry.state in {"local-not-installed", "local-missing-deps"}:
+            return self._stub_kernel_spec(entry)
+        return self._working_kernel_spec(entry)
+
+    def _kernel_metadata(self, entry: KernelEntry, *, kernel_state: str) -> dict[str, Any]:
+        """Build flat metadata shared by working and stub kernels."""
         ws = entry.workspace
-        env = entry.environment
         local_version = ws.local_version
         remote_version = ws.remote_version
-        # Independent version-drift signal: can be true even when nebi_state
-        # reports a higher-priority blocker (e.g. missing dependencies).
         is_outdated = bool(local_version and remote_version and local_version != remote_version)
 
-        argv = [
-            sys.executable,
-            "-m",
-            "nb_nebi_kernels.launcher",
-            ws.path,
-            env,
-            "{connection_file}",
-        ]
-
-        display_name = self._make_display_name(ws, env)
-
-        metadata = {
+        return {
             "nebi_workspace": ws.name,
             "nebi_workspace_path": ws.path,
-            "pixi_environment": env,
+            "pixi_environment": entry.environment,
             "nebi_state": entry.state,
+            "nebi_kernel_state": kernel_state,
             "nebi_missing_dependencies": entry.missing_dependencies,
             "nebi_local_version": local_version,
             "nebi_remote_version": remote_version,
@@ -342,22 +351,64 @@ class NebiKernelSpecManager(KernelSpecManager):  # type: ignore[misc]
             "nebi_discovered_at": self._discovered_at,
         }
 
+    def _working_kernel_spec(self, entry: KernelEntry) -> KernelSpec:
+        ws = entry.workspace
+        env = entry.environment
+        argv = [
+            sys.executable,
+            "-m",
+            "nb_nebi_kernels.launcher",
+            ws.path,
+            env,
+            "{connection_file}",
+        ]
+
         resource_dir = (
             ws.path if ws.path and os.path.isdir(ws.path) else self._fallback_resource_dir
         )
 
-        kernel_env = {
-            "NB_NEBI_KERNEL_STATE": entry.state,
-            "NB_NEBI_KERNEL_NAME": ws.name,
-        }
+        return KernelSpec(
+            argv=argv,
+            display_name=self._make_display_name(ws, env),
+            language="python",
+            resource_dir=resource_dir,
+            env={
+                "NB_NEBI_KERNEL_STATE": entry.state,
+                "NB_NEBI_KERNEL_NAME": ws.name,
+            },
+            metadata=self._kernel_metadata(
+                entry,
+                kernel_state=(
+                    "ready" if entry.state in {"ready", "outdated"} else entry.state
+                ),
+            ),
+        )
+
+    def _stub_kernel_spec(self, entry: KernelEntry) -> KernelSpec:
+        ws = entry.workspace
+        env = entry.environment
+        argv = [
+            sys.executable,
+            "-m",
+            "nb_nebi_kernels.stub_kernel",
+            "--workspace",
+            ws.name,
+            "--env",
+            env,
+            "-f",
+            "{connection_file}",
+        ]
+
+        resource_dir = (
+            ws.path if ws.path and os.path.isdir(ws.path) else self._fallback_resource_dir
+        )
 
         return KernelSpec(
             argv=argv,
-            display_name=display_name,
-            language="python",
+            display_name=self._make_display_name(ws, env),
+            language="no-op",
             resource_dir=resource_dir,
-            env=kernel_env,
-            metadata=metadata,
+            metadata=self._kernel_metadata(entry, kernel_state="missing-kernel"),
         )
 
     def get_all_specs(self) -> dict[str, dict[str, Any]]:

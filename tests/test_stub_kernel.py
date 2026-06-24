@@ -16,6 +16,8 @@ import pytest
 from jupyter_client.kernelspec import KernelSpec
 from jupyter_client.manager import KernelManager
 
+from nb_nebi_kernels.stub_kernel import build_message
+
 
 @pytest.fixture
 def stub_km() -> KernelManager:
@@ -93,3 +95,33 @@ class TestStubKernelProtocol:
         assert "broken-env" in joined
         assert "pixi add" in joined
         assert "ipykernel" in joined
+
+
+class TestStubKernelMessages:
+    """Direct tests for reason-specific recovery messages."""
+
+    def test_missing_dependencies_message_names_dependencies(self) -> None:
+        """Configured missing deps do not masquerade as missing Jupyter kernels."""
+        joined = "\n".join(
+            build_message(
+                "demo-ws",
+                "broken-env",
+                "missing-dependencies",
+                ["r-irkernel"],
+            )
+        )
+
+        assert "missing required launch dependencies" in joined
+        assert "r-irkernel" in joined
+        assert "does not contain a Jupyter kernel" not in joined
+        assert "pixi add" not in joined
+
+    def test_generic_not_ready_message_names_reason(self) -> None:
+        """Non-kernelspec blockers get a generic reason-aware recovery message."""
+        joined = "\n".join(
+            build_message("demo-ws", "broken-env", "environment-not-installed")
+        )
+
+        assert "not ready" in joined
+        assert "environment-not-installed" in joined
+        assert "does not contain a Jupyter kernel" not in joined

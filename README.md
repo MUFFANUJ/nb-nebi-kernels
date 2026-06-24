@@ -9,7 +9,7 @@ A custom Jupyter `KernelSpecManager` that automatically discovers local and remo
 3. Optionally discovers remote workspaces from the Nebi API using `NEBI_REMOTE_URL` and `NEBI_AUTH_TOKEN`.
 4. Enumerates environments per workspace (`pixi info --json` for local workspaces, remote `pixi.toml` parsing for remote-only workspaces).
 5. Classifies each kernel into a structured state (`ready`, `outdated`, `remote-not-pulled`, `local-not-installed`, `local-missing-deps`).
-6. Launches ready/outdated kernels via `pixi run --frozen` in the workspace directory with environment isolation.
+6. Launches each installed kernelspec's own command via `pixi run --frozen` with environment isolation.
 
 ## Installation
 
@@ -33,6 +33,8 @@ Once installed, any nebi-tracked pixi workspace appears as a kernel in JupyterLa
 - A workspace `data-science` with environments `default` and `gpu` shows as two kernels: **data-science (default)** and **data-science (gpu)**
 - A workspace `web-app` with only the default environment shows as just **web-app**
 - A remote-only workspace can still appear as a kernel (state: `remote-not-pulled`) before it is pulled locally
+- Python, R, Julia, xeus, and other kernels work generically through their installed `kernel.json`.
+- If one pixi environment contains multiple kernelspecs, the primary keeps the existing kernel name and additional kernels get deterministic suffixes.
 
 If discovery returns no workspaces, Jupyter falls back to its default kernels. If workspaces are discovered but local tools/dependencies are missing, kernels are surfaced as non-ready instead of crashing.
 
@@ -51,11 +53,11 @@ Optional behavior can be configured through environment variables and traitlets.
 ```python
 # Example in jupyter_server_config.py
 c.NebiKernelSpecManager.workspace_discovery_roots = ["/mnt/shared/nebi-workspaces"]
-c.NebiKernelSpecManager.required_launch_dependencies = ["ipykernel"]
+c.NebiKernelSpecManager.required_launch_dependencies = ["optional-extra-package"]
 ```
 
 - `workspace_discovery_roots` adds local discovery roots (in addition to `nebi workspace list` results).
-- `required_launch_dependencies` controls package checks required for a kernel to be considered launchable. Default: `["ipykernel"]`.
+- `required_launch_dependencies` optionally adds package checks beyond the installed Jupyter kernelspec. Default: `[]`.
 
 ## Kernel states and metadata
 
@@ -67,19 +69,19 @@ Each generated kernelspec includes state metadata for UI consumers.
 | `outdated` | Local and remote versions differ. | Allowed |
 | `remote-not-pulled` | Workspace exists remotely but has no local path yet. | Blocked |
 | `local-not-installed` | Local environment is not installed/materialized. | Blocked |
-| `local-missing-deps` | Local environment is missing required dependencies. | Blocked |
+| `local-missing-deps` | Local environment is missing required dependencies or a Jupyter kernelspec. | Blocked |
 
 Important metadata fields:
 
 - `nebi_state`, `nebi_not_ready_reason`, `nebi_missing_dependencies`
 - `nebi_local_version`, `nebi_remote_version`, `nebi_outdated`
 - `nebi_discovery_hash`, `nebi_discovered_at`
-- `nebi` (nested metadata object with the same core state fields)
 
 Stable `nebi_not_ready_reason` values include:
 
 - `workspace-not-pulled`
 - `missing-dependencies`
+- `kernel-not-installed`
 - `local-version-behind-remote`
 - `environment-not-installed`
 - `workspace-missing`

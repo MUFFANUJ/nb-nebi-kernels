@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from nb_nebi_kernels.discovery import (
     EnvironmentProbe,
     discover_environments,
+    discover_kernel_specs,
     discover_remote_workspaces,
     discover_workspaces,
     env_has_any_kernelspec,
@@ -253,7 +254,7 @@ class TestProbeEnvironment:
         )
 
     def test_detects_missing_ipykernel(self) -> None:
-        """Probe reports missing launch dependencies."""
+        """Probe reports explicitly configured missing launch dependencies."""
         mock_json = json.dumps([{"name": "python"}, {"name": "numpy"}])
         with (
             patch("nb_nebi_kernels.discovery.os.path.isdir", return_value=True),
@@ -262,10 +263,28 @@ class TestProbeEnvironment:
             patch("nb_nebi_kernels.discovery.subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0, stdout=mock_json, stderr="")
-            probe = probe_environment("/tmp/ws", "default")
+            probe = probe_environment("/tmp/ws", "default", ("ipykernel",))
 
         assert probe.installed is True
         assert probe.missing_dependencies == ["ipykernel"]
+
+    def test_does_not_require_ipykernel_by_default(self) -> None:
+        """An installed non-Python kernel environment is not blocked by package name."""
+        with (
+            patch("nb_nebi_kernels.discovery.os.path.isdir", return_value=True),
+            patch("nb_nebi_kernels.discovery.os.path.exists", return_value=True),
+            patch("nb_nebi_kernels.discovery._find_manifest", return_value="/tmp/pixi.toml"),
+            patch("nb_nebi_kernels.discovery.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps([{"name": "r-base"}, {"name": "r-irkernel"}]),
+                stderr="",
+            )
+            probe = probe_environment("/tmp/ws", "default")
+
+        assert probe.installed is True
+        assert probe.missing_dependencies == []
 
     def test_nonzero_pixi_list_returns_stable_reason(self) -> None:
         """Probe uses stable enum reason for generic pixi list failures."""
@@ -293,7 +312,15 @@ class TestEnvHasAnyKernelspec:
         """Detects a kernel.json under share/jupyter/kernels/."""
         kernels = tmp_path / ".pixi" / "envs" / "default" / "share" / "jupyter" / "kernels"
         (kernels / "python3").mkdir(parents=True)
-        (kernels / "python3" / "kernel.json").write_text("{}")
+        (kernels / "python3" / "kernel.json").write_text(
+            json.dumps(
+                {
+                    "argv": ["python", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                    "display_name": "Python 3",
+                    "language": "python",
+                }
+            )
+        )
 
         assert env_has_any_kernelspec(str(tmp_path), "default") is True
 
@@ -311,6 +338,51 @@ class TestEnvHasAnyKernelspec:
         """Returns True for any kernelspec, not just python3."""
         kernels = tmp_path / ".pixi" / "envs" / "gpu" / "share" / "jupyter" / "kernels"
         (kernels / "ir").mkdir(parents=True)
-        (kernels / "ir" / "kernel.json").write_text("{}")
+        (kernels / "ir" / "kernel.json").write_text(
+            json.dumps(
+                {
+                    "argv": [
+                        "R",
+                        "--slave",
+                        "-e",
+                        "IRkernel::main()",
+                        "--args",
+                        "{connection_file}",
+                    ],
+                    "display_name": "R",
+                    "language": "R",
+                }
+            )
+        )
 
         assert env_has_any_kernelspec(str(tmp_path), "gpu") is True
+
+    def test_discovers_all_kernelspecs_in_deterministic_order(self, tmp_path: Path) -> None:
+        """Python remains the backwards-compatible primary, then names are sorted."""
+        kernels = tmp_path / ".pixi" / "envs" / "default" / "share" / "jupyter" / "kernels"
+        specs = {
+            "zsh": {
+                "argv": ["zsh", "-c", "kernel", "{connection_file}"],
+                "display_name": "Z shell",
+                "language": "zsh",
+            },
+            "python3": {
+                "argv": ["python", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                "display_name": "Python 3",
+                "language": "python",
+            },
+            "ir": {
+                "argv": ["R", "--slave", "-e", "IRkernel::main()", "--args", "{connection_file}"],
+                "display_name": "R",
+                "language": "R",
+            },
+        }
+        for name, spec in specs.items():
+            resource_dir = kernels / name
+            resource_dir.mkdir(parents=True)
+            (resource_dir / "kernel.json").write_text(json.dumps(spec))
+
+        discovered = discover_kernel_specs(str(tmp_path), "default")
+
+        assert [item.name for item in discovered] == ["python3", "ir", "zsh"]
+        assert discovered[1].spec.language == "R"

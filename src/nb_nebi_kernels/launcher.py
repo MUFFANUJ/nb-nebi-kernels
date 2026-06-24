@@ -15,6 +15,15 @@ PIXI_ENV_VARS_TO_CLEAR = [
 ]
 
 
+def _find_manifest(workspace_dir: str) -> str:
+    """Find the pixi manifest file for a workspace."""
+    for name in ("pixi.toml", "pyproject.toml"):
+        path = os.path.join(workspace_dir, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(workspace_dir, "pixi.toml")
+
+
 def _print_state_error(state: str, kernel_name: str) -> None:
     """Print a user-facing launch blocker message for non-ready kernels."""
     if state == "remote-not-pulled":
@@ -35,38 +44,38 @@ def _print_state_error(state: str, kernel_name: str) -> None:
     elif state == "local-missing-deps":
         print(
             (
-                f"Nebi kernel '{kernel_name}' is missing required dependencies "
-                "(for example ipykernel)."
+                f"Nebi kernel '{kernel_name}' is missing required launch dependencies "
+                "or an installed Jupyter kernel."
             ),
             file=sys.stderr,
         )
         print(
-            "Install missing dependencies in the pixi environment, then refresh kernels.",
+            "Install the missing dependencies or kernel package, then refresh kernels.",
             file=sys.stderr,
         )
 
 
 def main() -> None:
-    """Launch ipykernel via pixi in an isolated workspace directory.
+    """Launch an installed Jupyter kernel via pixi in an isolated workspace.
 
     Usage:
-        python -m nb_nebi_kernels.launcher <workspace_dir> <environment> <connection_file>
+        python -m nb_nebi_kernels.launcher <workspace_dir> <environment> <kernel-command>...
 
     Args:
-        workspace_dir: Directory containing pixi.toml
+        workspace_dir: Directory containing pixi.toml or pyproject.toml
         environment: Pixi environment name (e.g. "default", "gpu")
-        connection_file: Path to Jupyter connection file
+        kernel-command: The installed kernelspec argv after Jupyter substitutions
     """
-    if len(sys.argv) != 4:
+    if len(sys.argv) < 4:
         print(
-            f"Usage: {sys.argv[0]} <workspace_dir> <environment> <connection_file>",
+            f"Usage: {sys.argv[0]} <workspace_dir> <environment> <kernel-command>...",
             file=sys.stderr,
         )
         sys.exit(1)
 
     workspace_dir = sys.argv[1]
     environment = sys.argv[2]
-    connection_file = sys.argv[3]
+    kernel_command = sys.argv[3:]
     kernel_state = os.environ.get("NB_NEBI_KERNEL_STATE", "").strip()
     kernel_name = os.environ.get("NB_NEBI_KERNEL_NAME", "<unknown>")
 
@@ -86,26 +95,21 @@ def main() -> None:
         sys.exit(1)
 
     os.chdir(workspace_dir)
+    manifest = _find_manifest(workspace_dir)
 
     cmd = [
         "pixi",
         "run",
         "--frozen",
         "--manifest-path",
-        os.path.join(workspace_dir, "pixi.toml"),
+        manifest,
     ]
 
     # Only pass -e flag for non-default environments
     if environment != "default":
         cmd.extend(["-e", environment])
 
-    cmd.extend([
-        "python",
-        "-m",
-        "ipykernel_launcher",
-        "-f",
-        connection_file,
-    ])
+    cmd.extend(kernel_command)
 
     os.execvp("pixi", cmd)
 

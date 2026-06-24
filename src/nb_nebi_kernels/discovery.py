@@ -13,6 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from jupyter_client.kernelspec import KernelSpec
+
 logger = logging.getLogger(__name__)
 
 PROBE_REASON_WORKSPACE_MISSING = "workspace-missing"
@@ -42,6 +44,14 @@ class EnvironmentProbe:
     installed: bool
     missing_dependencies: list[str]
     reason: str | None = None
+
+
+@dataclass
+class EnvironmentKernelSpec:
+    """A kernelspec installed in a pixi environment."""
+
+    name: str
+    spec: KernelSpec
 
 
 def _parse_local_version(ws: dict[str, Any]) -> str | None:
@@ -332,12 +342,12 @@ def _find_manifest(workspace_path: str) -> str:
     return os.path.join(workspace_path, "pixi.toml")
 
 
-def env_has_any_kernelspec(workspace_path: str, env: str) -> bool:
-    """Return True if the pixi env contains at least one Jupyter kernelspec.
+def discover_kernel_specs(workspace_path: str, env: str) -> list[EnvironmentKernelSpec]:
+    """Load all valid kernelspecs installed in a pixi environment.
 
     Looks under ``<workspace>/.pixi/envs/<env>/share/jupyter/kernels/*/kernel.json``.
-    Returns False if the env prefix doesn't exist (env never installed) — same
-    user-facing failure (no kernel available), same recovery (install one).
+    Results are deterministic, with the conventional Python kernels first for
+    backwards compatibility and all remaining kernels sorted by name.
     """
     pattern = os.path.join(
         workspace_path,
@@ -350,7 +360,34 @@ def env_has_any_kernelspec(workspace_path: str, env: str) -> bool:
         "*",
         "kernel.json",
     )
-    return bool(glob.glob(pattern))
+    kernel_specs: list[EnvironmentKernelSpec] = []
+    for kernel_file in glob.glob(pattern):
+        resource_dir = os.path.dirname(kernel_file)
+        name = os.path.basename(resource_dir)
+        try:
+            spec = KernelSpec.from_resource_dir(resource_dir)
+        except Exception:
+            logger.warning("Ignoring invalid kernelspec: %s", kernel_file, exc_info=True)
+            continue
+        if not spec.argv:
+            logger.warning("Ignoring kernelspec without argv: %s", kernel_file)
+            continue
+        kernel_specs.append(EnvironmentKernelSpec(name=name, spec=spec))
+
+    preferred_names = {"python3": 0, "python": 1}
+    return sorted(
+        kernel_specs,
+        key=lambda item: (
+            preferred_names.get(item.name.lower(), 2),
+            item.name.lower(),
+            item.name,
+        ),
+    )
+
+
+def env_has_any_kernelspec(workspace_path: str, env: str) -> bool:
+    """Return whether a pixi environment contains a valid Jupyter kernelspec."""
+    return bool(discover_kernel_specs(workspace_path, env))
 
 
 def discover_environments(workspace_path: str) -> list[str]:
@@ -422,7 +459,7 @@ def _extract_package_names(data: Any) -> set[str]:
 def probe_environment(
     workspace_path: str,
     env: str,
-    required_dependencies: tuple[str, ...] = ("ipykernel",),
+    required_dependencies: tuple[str, ...] = (),
 ) -> EnvironmentProbe:
     """Check whether an environment is installed and has required dependencies."""
     if not workspace_path or not os.path.isdir(workspace_path):

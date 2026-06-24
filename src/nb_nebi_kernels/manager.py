@@ -17,11 +17,12 @@ from jupyter_client.kernelspec import KernelSpec, KernelSpecManager, NoSuchKerne
 from traitlets import Float, List, Unicode
 
 from nb_nebi_kernels.discovery import (
+    EnvironmentKernelSpec,
     NebiWorkspace,
     discover_environments,
+    discover_kernel_specs,
     discover_remote_workspaces,
     discover_workspaces,
-    env_has_any_kernelspec,
     probe_environment,
 )
 
@@ -37,12 +38,15 @@ class KernelEntry:
     state: str
     missing_dependencies: list[str]
     not_ready_reason: str | None
+    kernel_spec: EnvironmentKernelSpec | None = None
+    show_kernel_display_name: bool = False
 
 
 class NebiKernelSpecManager(KernelSpecManager):
     """KernelSpecManager that discovers kernels from nebi-tracked pixi workspaces.
 
-    Each (workspace, environment) pair becomes a launchable Jupyter kernel.
+    Each local workspace environment exposes one kernel per installed kernelspec.
+    Non-ready environments expose a stub kernel with an actionable error.
     Workspaces are discovered via ``nebi workspace list`` and environments
     via ``pixi workspace environment list``.
     """
@@ -58,9 +62,12 @@ class NebiKernelSpecManager(KernelSpecManager):
     )
     required_launch_dependencies = List(
         Unicode(),
-        default_value=["ipykernel"],
+        default_value=[],
         config=True,
-        help="Packages required in each pixi environment for a kernel to be launchable.",
+        help=(
+            "Optional packages required in addition to an installed Jupyter kernelspec. "
+            "By default, any valid kernelspec is launchable."
+        ),
     )
     discovery_cache_ttl_seconds = Float(
         default_value=30.0,
@@ -101,11 +108,67 @@ class NebiKernelSpecManager(KernelSpecManager):
         name = re.sub(r"[^a-zA-Z0-9._\-]", "_", name)
         return name
 
-    def _make_kernel_name(self, workspace: NebiWorkspace, env: str) -> str:
+    def _make_kernel_name(
+        self, workspace: NebiWorkspace, env: str, kernel_spec_name: str | None = None
+    ) -> str:
         """Generate a kernel name from a workspace and environment."""
         clean_ws = self.clean_kernel_name(workspace.name)
         clean_env = self.clean_kernel_name(env)
-        return f"nebi-{clean_ws}-{clean_env}"
+        name = f"nebi-{clean_ws}-{clean_env}"
+        if kernel_spec_name:
+            name = f"{name}-{self.clean_kernel_name(kernel_spec_name)}"
+        return name
+
+    @staticmethod
+    def _entry_identity(entry: KernelEntry) -> tuple[str, str, str, str, str]:
+        """Return stable fields that identify the source of a kernel entry."""
+        kernel_spec_name = entry.kernel_spec.name if entry.kernel_spec else ""
+        kernel_spec_dir = entry.kernel_spec.spec.resource_dir if entry.kernel_spec else ""
+        return (
+            entry.workspace.name,
+            entry.workspace.path,
+            entry.environment,
+            kernel_spec_name,
+            kernel_spec_dir,
+        )
+
+    @staticmethod
+    def _collision_suffix(entry: KernelEntry) -> str:
+        """Return a stable short suffix for a colliding kernel entry."""
+        payload = "\0".join(NebiKernelSpecManager._entry_identity(entry))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+    def _register_kernel_entry(self, kernel_name: str, entry: KernelEntry) -> None:
+        """Register a kernel entry without silently overwriting name collisions."""
+        if kernel_name not in self._kernel_registry:
+            self._kernel_registry[kernel_name] = entry
+            return
+
+        entry_identity = self._entry_identity(entry)
+        if self._entry_identity(self._kernel_registry[kernel_name]) == entry_identity:
+            logger.warning("Skipping duplicate Nebi kernel entry for %s", kernel_name)
+            return
+
+        suffix = self._collision_suffix(entry)
+        candidate = f"{kernel_name}-{suffix}"
+        existing = self._kernel_registry.get(candidate)
+        if existing:
+            if self._entry_identity(existing) == entry_identity:
+                logger.warning("Skipping duplicate Nebi kernel entry for %s", candidate)
+            else:
+                logger.warning(
+                    "Skipping Nebi kernel entry for %s; collision name %s is already registered",
+                    kernel_name,
+                    candidate,
+                )
+            return
+
+        logger.warning(
+            "Nebi kernel name collision for %s; registered colliding entry as %s",
+            kernel_name,
+            candidate,
+        )
+        self._kernel_registry[candidate] = entry
 
     def _make_display_name(self, workspace: NebiWorkspace, env: str) -> str:
         """Generate a display name for the Jupyter kernel picker.
@@ -129,69 +192,81 @@ class NebiKernelSpecManager(KernelSpecManager):
                     merged.append(env_name)
         return merged
 
-    def _classify_kernel_state(self, workspace: NebiWorkspace, env: str) -> KernelEntry:
-        """Classify kernel state for the given workspace/environment."""
+    def _classify_environment(self, workspace: NebiWorkspace, env: str) -> list[KernelEntry]:
+        """Classify and expand one workspace environment into kernel entries."""
         if workspace.source == "remote" or not workspace.path:
-            return KernelEntry(
-                workspace=workspace,
-                environment=env,
-                state="remote-not-pulled",
-                missing_dependencies=[],
-                not_ready_reason="workspace-not-pulled",
-            )
+            return [
+                KernelEntry(
+                    workspace=workspace,
+                    environment=env,
+                    state="remote-not-pulled",
+                    missing_dependencies=[],
+                    not_ready_reason="workspace-not-pulled",
+                )
+            ]
 
         probe = probe_environment(
             workspace.path,
             env,
-            tuple(self.required_launch_dependencies) or ("ipykernel",),
+            tuple(self.required_launch_dependencies),
         )
         if not probe.installed:
-            return KernelEntry(
-                workspace=workspace,
-                environment=env,
-                state="local-not-installed",
-                missing_dependencies=[],
-                not_ready_reason=probe.reason or "environment-not-installed",
-            )
+            return [
+                KernelEntry(
+                    workspace=workspace,
+                    environment=env,
+                    state="local-not-installed",
+                    missing_dependencies=[],
+                    not_ready_reason=probe.reason or "environment-not-installed",
+                )
+            ]
 
         if probe.missing_dependencies:
-            return KernelEntry(
-                workspace=workspace,
-                environment=env,
-                state="local-missing-deps",
-                missing_dependencies=probe.missing_dependencies,
-                not_ready_reason="missing-dependencies",
-            )
+            return [
+                KernelEntry(
+                    workspace=workspace,
+                    environment=env,
+                    state="local-missing-deps",
+                    missing_dependencies=probe.missing_dependencies,
+                    not_ready_reason="missing-dependencies",
+                )
+            ]
 
-        if not env_has_any_kernelspec(workspace.path, env):
-            return KernelEntry(
-                workspace=workspace,
-                environment=env,
-                state="local-missing-deps",
-                missing_dependencies=["ipykernel"],
-                not_ready_reason="missing-dependencies",
-            )
+        kernel_specs = discover_kernel_specs(workspace.path, env)
+        if not kernel_specs:
+            return [
+                KernelEntry(
+                    workspace=workspace,
+                    environment=env,
+                    state="local-missing-deps",
+                    missing_dependencies=[],
+                    not_ready_reason="kernel-not-installed",
+                )
+            ]
 
+        state = "ready"
+        not_ready_reason = None
         if (
             workspace.local_version
             and workspace.remote_version
             and workspace.local_version != workspace.remote_version
         ):
-            return KernelEntry(
+            state = "outdated"
+            not_ready_reason = "local-version-behind-remote"
+
+        show_kernel_display_name = len(kernel_specs) > 1
+        return [
+            KernelEntry(
                 workspace=workspace,
                 environment=env,
-                state="outdated",
+                state=state,
                 missing_dependencies=[],
-                not_ready_reason="local-version-behind-remote",
+                not_ready_reason=not_ready_reason,
+                kernel_spec=kernel_spec,
+                show_kernel_display_name=show_kernel_display_name,
             )
-
-        return KernelEntry(
-            workspace=workspace,
-            environment=env,
-            state="ready",
-            missing_dependencies=[],
-            not_ready_reason=None,
-        )
+            for kernel_spec in kernel_specs
+        ]
 
     def _merge_workspaces(
         self, local_workspaces: list[NebiWorkspace], remote_workspaces: list[NebiWorkspace]
@@ -235,6 +310,7 @@ class NebiKernelSpecManager(KernelSpecManager):
                     "workspace_path": workspace.path,
                     "source": workspace.source,
                     "environment": entry.environment,
+                    "kernel_spec": entry.kernel_spec.name if entry.kernel_spec else None,
                     "state": entry.state,
                     "missing_dependencies": entry.missing_dependencies,
                     "local_version": workspace.local_version,
@@ -283,8 +359,15 @@ class NebiKernelSpecManager(KernelSpecManager):
                 self._single_env_workspaces.add(ws.name)
 
             for env in envs:
-                kernel_name = self._make_kernel_name(ws, env)
-                self._kernel_registry[kernel_name] = self._classify_kernel_state(ws, env)
+                entries = self._classify_environment(ws, env)
+                for index, entry in enumerate(entries):
+                    kernel_spec_name = (
+                        entry.kernel_spec.name
+                        if len(entries) > 1 and index > 0 and entry.kernel_spec
+                        else None
+                    )
+                    kernel_name = self._make_kernel_name(ws, env, kernel_spec_name)
+                    self._register_kernel_entry(kernel_name, entry)
 
         self._update_discovery_metadata()
         self._last_discovery_monotonic = time.monotonic()
@@ -297,8 +380,13 @@ class NebiKernelSpecManager(KernelSpecManager):
         self._discover()
 
         for kernel_name, entry in self._kernel_registry.items():
-            workspace_path = entry.workspace.path
-            specs[kernel_name] = workspace_path if workspace_path else self._fallback_resource_dir
+            if entry.kernel_spec:
+                specs[kernel_name] = entry.kernel_spec.spec.resource_dir
+            else:
+                workspace_path = entry.workspace.path
+                specs[kernel_name] = (
+                    workspace_path if workspace_path else self._fallback_resource_dir
+                )
 
         return specs
 
@@ -339,6 +427,7 @@ class NebiKernelSpecManager(KernelSpecManager):
             "nebi_workspace": ws.name,
             "nebi_workspace_path": ws.path,
             "pixi_environment": entry.environment,
+            "nebi_kernel_spec": entry.kernel_spec.name if entry.kernel_spec else None,
             "nebi_state": entry.state,
             "nebi_kernel_state": kernel_state,
             "nebi_missing_dependencies": entry.missing_dependencies,
@@ -354,34 +443,53 @@ class NebiKernelSpecManager(KernelSpecManager):
     def _working_kernel_spec(self, entry: KernelEntry) -> KernelSpec:
         ws = entry.workspace
         env = entry.environment
+        source_spec = entry.kernel_spec.spec if entry.kernel_spec else None
+        kernel_argv = (
+            list(source_spec.argv)
+            if source_spec
+            else ["python", "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+        )
         argv = [
             sys.executable,
             "-m",
             "nb_nebi_kernels.launcher",
             ws.path,
             env,
-            "{connection_file}",
+            *kernel_argv,
         ]
 
         resource_dir = (
-            ws.path if ws.path and os.path.isdir(ws.path) else self._fallback_resource_dir
+            source_spec.resource_dir
+            if source_spec
+            else ws.path
+            if ws.path and os.path.isdir(ws.path)
+            else self._fallback_resource_dir
+        )
+        display_name = self._make_display_name(ws, env)
+        if entry.show_kernel_display_name and entry.kernel_spec and source_spec:
+            kernel_display_name = source_spec.display_name or entry.kernel_spec.name
+            display_name = f"{display_name} — {kernel_display_name}"
+
+        metadata = dict(source_spec.metadata) if source_spec else {}
+        metadata.update(
+            self._kernel_metadata(
+                entry,
+                kernel_state=("ready" if entry.state in {"ready", "outdated"} else entry.state),
+            )
         )
 
         return KernelSpec(
             argv=argv,
-            display_name=self._make_display_name(ws, env),
-            language="python",
+            display_name=display_name,
+            language=source_spec.language if source_spec else "python",
             resource_dir=resource_dir,
             env={
+                **(dict(source_spec.env) if source_spec else {}),
                 "NB_NEBI_KERNEL_STATE": entry.state,
                 "NB_NEBI_KERNEL_NAME": ws.name,
             },
-            metadata=self._kernel_metadata(
-                entry,
-                kernel_state=(
-                    "ready" if entry.state in {"ready", "outdated"} else entry.state
-                ),
-            ),
+            interrupt_mode=source_spec.interrupt_mode if source_spec else "signal",
+            metadata=metadata,
         )
 
     def _stub_kernel_spec(self, entry: KernelEntry) -> KernelSpec:
@@ -395,9 +503,15 @@ class NebiKernelSpecManager(KernelSpecManager):
             ws.name,
             "--env",
             env,
+            "--reason",
+            entry.not_ready_reason or entry.state,
+        ]
+        for dependency in entry.missing_dependencies:
+            argv.extend(["--missing-dependency", dependency])
+        argv.extend([
             "-f",
             "{connection_file}",
-        ]
+        ])
 
         resource_dir = (
             ws.path if ws.path and os.path.isdir(ws.path) else self._fallback_resource_dir

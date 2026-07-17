@@ -1,13 +1,13 @@
-"""Stub kernel that surfaces 'no kernel installed in env' to the user.
+"""Stub kernel that surfaces not-ready Nebi kernel states to the user.
 
-When ``NebiKernelSpecManager`` discovers a (workspace, env) pair whose pixi
-env has no Jupyter kernel package installed, it emits a kernelspec pointing
-at this module instead of the regular launcher. The stub subclasses
+When ``NebiKernelSpecManager`` discovers a (workspace, env) pair that cannot
+launch yet, it emits a kernelspec pointing at this module instead of the regular
+launcher. The stub subclasses
 ``ipykernel.kernelbase.Kernel`` so it inherits the full Jupyter messaging
 protocol (ZMQ binding, heartbeat, signing, kernel_info handshake). JupyterLab
 treats it as a live kernel rather than misclassifying a fast-exiting launcher
 as "kernel died, retry". Any ``execute_request`` returns a structured error
-whose traceback is the install instructions — visible in cell output.
+whose traceback is the recovery instruction — visible in cell output.
 """
 
 from __future__ import annotations
@@ -22,25 +22,76 @@ from ipykernel.kernelbase import Kernel
 ENAME = "MissingKernelError"
 
 
-def build_message(workspace: str, env: str) -> list[str]:
+def build_message(
+    workspace: str,
+    env: str,
+    reason: str = "kernel-not-installed",
+    missing_dependencies: list[str] | None = None,
+) -> list[str]:
     """Return the install message as a list of traceback lines."""
-    return [
-        f"This pixi environment ('{env}') does not contain a Jupyter kernel.",
+    missing_dependencies = missing_dependencies or []
+    common = [
         "",
         f"  Workspace:  {workspace}",
         f"  Pixi env:   {env}",
+        f"  Reason:     {reason}",
         "",
-        "Install one with, e.g.:",
+    ]
+
+    if reason == "missing-dependencies":
+        lines = [
+            f"This pixi environment ('{env}') is missing required launch dependencies.",
+            *common,
+        ]
+        if missing_dependencies:
+            lines.extend([
+                "Missing dependencies:",
+                "",
+                *[f"  - {dependency}" for dependency in missing_dependencies],
+                "",
+            ])
+        lines.extend([
+            "Install the missing dependencies in the pixi environment.",
+            "",
+            "Then re-open this notebook and select the kernel again.",
+        ])
+        return lines
+
+    if reason != "kernel-not-installed":
+        return [
+            f"This Nebi kernel is not ready for pixi environment ('{env}').",
+            *common,
+            "Resolve the pixi environment issue, refresh kernels, then select the kernel again.",
+        ]
+
+    return [
+        f"This pixi environment ('{env}') does not contain a Jupyter kernel.",
+        *common,
+        (
+            "From the workspace directory, install a Jupyter kernel supported "
+            "by this environment, for example:"
+        ),
         "",
-        f"  pixi add --manifest-path /path/to/{workspace}/pixi.toml \\",
-        f"      --feature {env} ipykernel",
+        f"  cd /path/to/{workspace}",
+        f"  pixi add --feature {env} ipykernel",
+        "",
+        "Other kernels such as IRkernel, IJulia, and xeus-based kernels are also supported.",
         "",
         "Then re-open this notebook and select the kernel again.",
     ]
 
 
-class StubKernel(Kernel):  # type: ignore[misc]
-    """A Jupyter kernel that exists only to surface a missing-kernel error.
+def _error_value(reason: str, env: str) -> str:
+    """Return the short error value for a not-ready reason."""
+    if reason == "kernel-not-installed":
+        return f"No Jupyter kernel installed in pixi env '{env}'"
+    if reason == "missing-dependencies":
+        return f"Missing required launch dependencies in pixi env '{env}'"
+    return f"Nebi kernel is not ready in pixi env '{env}'"
+
+
+class StubKernel(Kernel):
+    """A Jupyter kernel that exists only to surface a not-ready error.
 
     Override class attributes ``nebi_workspace`` and ``nebi_env`` (typically via
     a subclass produced at launch time) so the error message names the
@@ -59,14 +110,9 @@ class StubKernel(Kernel):  # type: ignore[misc]
 
     nebi_workspace: str = "<unknown>"
     nebi_env: str = "<unknown>"
-
-    @property
-    def banner(self) -> str:
-        return (
-            f"Nebi stub kernel — pixi env '{self.nebi_env}' in workspace "
-            f"'{self.nebi_workspace}' has no Jupyter kernel installed.\n"
-            f"Any cell you run will print the install instructions."
-        )
+    nebi_reason: str = "kernel-not-installed"
+    nebi_missing_dependencies: list[str] = []
+    banner = "Nebi stub kernel — this pixi environment is not ready."
 
     async def do_execute(  # type: ignore[override]
         self,
@@ -78,8 +124,13 @@ class StubKernel(Kernel):  # type: ignore[misc]
         *,
         cell_id: str | None = None,
     ) -> dict[str, Any]:
-        evalue = f"No Jupyter kernel installed in pixi env '{self.nebi_env}'"
-        traceback = build_message(self.nebi_workspace, self.nebi_env)
+        evalue = _error_value(self.nebi_reason, self.nebi_env)
+        traceback = build_message(
+            self.nebi_workspace,
+            self.nebi_env,
+            self.nebi_reason,
+            self.nebi_missing_dependencies,
+        )
 
         if not silent:
             self.send_response(
@@ -100,10 +151,22 @@ class StubKernel(Kernel):  # type: ignore[misc]
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nb_nebi_kernels.stub_kernel",
-        description="Nebi stub kernel for envs missing a Jupyter kernel package.",
+        description="Nebi stub kernel for envs that are not ready to launch.",
     )
     parser.add_argument("--workspace", required=True, help="Nebi workspace name")
     parser.add_argument("--env", required=True, help="Pixi environment name")
+    parser.add_argument(
+        "--reason",
+        default="kernel-not-installed",
+        help="Stable not-ready reason for this stub kernel",
+    )
+    parser.add_argument(
+        "--missing-dependency",
+        action="append",
+        default=[],
+        dest="missing_dependencies",
+        help="Missing launch dependency; may be provided multiple times",
+    )
     parser.add_argument(
         "-f",
         "--connection-file",
@@ -121,7 +184,17 @@ def main(argv: list[str] | None = None) -> None:
     kernel_cls = type(
         "ConfiguredStubKernel",
         (StubKernel,),
-        {"nebi_workspace": args.workspace, "nebi_env": args.env},
+        {
+            "nebi_workspace": args.workspace,
+            "nebi_env": args.env,
+            "nebi_reason": args.reason,
+            "nebi_missing_dependencies": args.missing_dependencies,
+            "banner": (
+                f"Nebi stub kernel — pixi env '{args.env}' in workspace "
+                f"'{args.workspace}' is not ready ({args.reason}).\n"
+                "Any cell you run will print the recovery instructions."
+            ),
+        },
     )
 
     # ipykernel's CLI parses sys.argv for `-f <connection_file>`. We've already

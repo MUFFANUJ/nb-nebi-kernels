@@ -10,7 +10,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from jupyter_client.kernelspec import KernelSpec, KernelSpecManager, NoSuchKernel
@@ -292,6 +292,7 @@ class NebiKernelSpecManager(KernelSpecManager):
                 local_version=remote_ws.local_version,
                 remote_version=remote_ws.remote_version,
                 environments=remote_ws.environments,
+                install_status=remote_ws.install_status,
                 source="remote",
             )
 
@@ -315,13 +316,14 @@ class NebiKernelSpecManager(KernelSpecManager):
                     "missing_dependencies": entry.missing_dependencies,
                     "local_version": workspace.local_version,
                     "remote_version": workspace.remote_version,
+                    "install_status": workspace.install_status,
                     "not_ready_reason": entry.not_ready_reason,
                 }
             )
 
         payload = json.dumps(summary, sort_keys=True, separators=(",", ":"))
         self._discovery_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        self._discovered_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self._discovered_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def invalidate_discovery_cache(self) -> None:
         """Force the next discovery call to recompute immediately."""
@@ -396,7 +398,16 @@ class NebiKernelSpecManager(KernelSpecManager):
             entry = self._kernel_registry[kernel_name]
             return self._create_kernel_spec(entry)
 
-        # Refresh in case a new workspace was added
+        if not kernel_name.startswith("nebi-"):
+            return super().get_kernel_spec(kernel_name)
+
+        self._discover()
+        if kernel_name in self._kernel_registry:
+            entry = self._kernel_registry[kernel_name]
+            return self._create_kernel_spec(entry)
+
+        # A Nebi miss can mean a workspace was added since the last cached
+        # refresh.
         self._discover(force=True)
         if kernel_name in self._kernel_registry:
             entry = self._kernel_registry[kernel_name]
@@ -408,11 +419,15 @@ class NebiKernelSpecManager(KernelSpecManager):
         """Create a KernelSpec for a workspace environment.
 
         Launchable entries route through the pixi-based launcher. Local
-        entries that are not installed or are missing a Jupyter kernel route
+        entries that are not installed, not pulled, or missing a Jupyter kernel route
         through ``nb_nebi_kernels.stub_kernel`` so the user gets an actionable
         cell error instead of a silent kernel failure.
         """
-        if entry.state in {"local-not-installed", "local-missing-deps"}:
+        if entry.state in {
+            "remote-not-pulled",
+            "local-not-installed",
+            "local-missing-deps",
+        }:
             return self._stub_kernel_spec(entry)
         return self._working_kernel_spec(entry)
 
@@ -434,6 +449,7 @@ class NebiKernelSpecManager(KernelSpecManager):
             "nebi_local_version": local_version,
             "nebi_remote_version": remote_version,
             "nebi_outdated": is_outdated,
+            "nebi_install_status": ws.install_status,
             "nebi_source": ws.source,
             "nebi_not_ready_reason": entry.not_ready_reason,
             "nebi_discovery_hash": self._discovery_hash,
@@ -522,7 +538,7 @@ class NebiKernelSpecManager(KernelSpecManager):
             display_name=self._make_display_name(ws, env),
             language="no-op",
             resource_dir=resource_dir,
-            metadata=self._kernel_metadata(entry, kernel_state="missing-kernel"),
+            metadata=self._kernel_metadata(entry, kernel_state=entry.state),
         )
 
     def get_all_specs(self) -> dict[str, dict[str, Any]]:

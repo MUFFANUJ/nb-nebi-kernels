@@ -129,4 +129,4 @@ src/nb_nebi_kernels/
 
 ## License
 
-MIT
+Apache License 2.0
